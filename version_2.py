@@ -2,6 +2,11 @@ import torch
 import torch.nn as nn
 from torch.nn import functional as F
 
+#parameters
+n_embed = 32
+vocab_size = 65
+learning_rate = 1e-3
+device = "cuda" if torch.cuda.is_available() else "cpu"
 
 with open("input.txt", "r", encoding="utf-8") as f:
     text = f.read()
@@ -63,7 +68,7 @@ for i in range(block_size):
     target = y[i]
 
     # I personally don't understand this part quite so I am trying to print it here and visualize it
-    print(f"when input is {context} the target: {target}")
+    # print(f"when input is {context} the target: {target}")
 
 
 # Now we are going to use batches
@@ -88,7 +93,35 @@ for b in range(batch_size):
     for t in range(block_size):
       context = xb[b,:t+1]
       target = yb[b,t]
-      print(f"when input is {context.tolist()} the target: {target}")
+    #   print(f"when input is {context.tolist()} the target: {target}")
+
+
+# creating a self attention one head
+
+class Head(nn.Module):
+   
+    def __init__(self, head_size):
+        super().__init__()
+        self.key = nn.Linear(n_embed, head_size, bias=False)
+        self.query = nn.Linear(n_embed, head_size, bias=False)
+        self.value = nn.Linear(n_embed, head_size, bias=False)
+        self.register_buffer("tril", torch.tril(torch.ones(block_size, block_size)))
+        
+    def forward(self, x):
+      
+      B, T, C = x.shape
+      k = self.key(x)   # (B, T, head_size)
+      q = self.query(x) # (B, T, head_size)
+
+      # compute attention scores
+      wei = q @ k.transpose(-2, -1) * C**-0.5 # (B, T, T)
+      wei = wei.masked_fill(self.tril[:T, :T] == 0, float('-inf'))
+      wei = F.softmax(wei, dim=-1) # (B, T, T)
+
+      # now performing weighted summation
+      v = self.value(x)
+      out = wei @ v # (B, T, head_size)
+      return out
 
 
 # we will start with creating the most basic form of neural network which is a bigram model
@@ -99,12 +132,27 @@ for b in range(batch_size):
 torch.manual_seed(1337)
 
 class BigramLanguageModel(nn.Module):
-    def __init__(self, vocab_size):
+    def __init__(self):
         super().__init__()
-        self.token_embedding_table = nn.Embedding(vocab_size, vocab_size)
+        self.token_embedding_table = nn.Embedding(vocab_size, n_embed)
+        self.position_embedding_table = nn.Embedding(block_size, n_embed)
+
+        #instantiating the linear model head
+        self.sa_head = Head(n_embed)
+        self.lnmdl_head = nn.Linear(n_embed, vocab_size)
+
 
     def forward(self, idx, targets=None):
-        logits = self.token_embedding_table(idx)
+
+        B, T = idx.shape
+        
+        token_emb = self.token_embedding_table(idx) # (B, T, C)
+        pos_embd = self.position_embedding_table(torch.arange(T, device=idx.device)) # (T, C)
+        x= token_emb + pos_embd
+        x= self.sa_head(x)
+        logits = self.lnmdl_head(x) # (B, T, vocab_size)
+        
+
 
         # loss function
 
@@ -122,9 +170,12 @@ class BigramLanguageModel(nn.Module):
     # Here we will write a generate function that will generate tokens from the Bigram Model
     def generate(self, idx, max_new_tokens):
         for _ in range(max_new_tokens):
+            
+            #controlling so we don't get an overflow of context
+            idx_cond = idx[:, -block_size:]
 
             # Here we get the predictions
-            logits, loss = self.forward(idx)
+            logits, loss = self.forward(idx_cond)
 
             # Here we tell the model to only focus on the last time stamp
             logits = logits[:, -1, :]
@@ -142,10 +193,10 @@ class BigramLanguageModel(nn.Module):
 
 
 
-m = BigramLanguageModel(vocab_size)
+m = BigramLanguageModel()
 logits, loss = m(xb, yb)
-print(logits.shape)
-print(loss)
+# print(logits.shape)
+# print(loss)
 
 idx = torch.zeros((1,1), dtype=torch.long)
 print(decode(m.generate(idx, max_new_tokens=100)[0].tolist()))
@@ -154,7 +205,7 @@ print(decode(m.generate(idx, max_new_tokens=100)[0].tolist()))
 # Now we are going to train the Bigram Model as the text it outputed is really bad
 # for this we will be using PyTorch to optimize the weights and biases of the model
 
-optimizer = torch.optim.AdamW(m.parameters(), lr=1e-3)
+optimizer = torch.optim.AdamW(m.parameters(), learning_rate)
 
 
 batch_size = 32
@@ -175,3 +226,4 @@ print(loss.item())
 
 idx = torch.zeros((1,1), dtype=torch.long)
 print(decode(m.generate(idx, max_new_tokens=500)[0].tolist()))
+
